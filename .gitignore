@@ -1,0 +1,12 @@
+# PlatformIO build artefacts
+heltec-otaa/.pio/
+heltec-otaa/.vscode/
+
+# Internal handover / operational docs (contain real credentials)
+CLAUDE.md
+ttn-*.md
+handover-*.md
+
+# Windows
+Thumbs.db
+desktop.ini
