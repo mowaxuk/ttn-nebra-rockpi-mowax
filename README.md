@@ -2,7 +2,7 @@
 
 A complete, battle-tested setup guide for running a LoRaWAN BasicStation gateway on a Rock Pi 4B+ with a Nebra Indoor LoRa HAT, plus a companion Heltec V3 TTN Mapper node. Documents every non-obvious problem encountered on the way to a working system: module misidentification, GPIO polarity inversions, libgpiod v2 syntax changes, NTP timing, and TTN DevNonce floor behaviour.
 
-**Who this is for:** Anyone running BasicStation on a Rock Pi with a Nebra Indoor HAT — especially if the fitted module is a GL5712-UX (black PCB, no status LEDs). Most of the failure modes here are undocumented elsewhere and will cost you days without a guide like this.
+**Who this is for:** Anyone running BasicStation on a Rock Pi with a Nebra Indoor HAT — especially if the fitted module is a GL5712-UX 1301 (black PCB, no status LEDs). Most of the failure modes here are undocumented elsewhere and will cost you days without a guide like this.
 
 * * *
 
