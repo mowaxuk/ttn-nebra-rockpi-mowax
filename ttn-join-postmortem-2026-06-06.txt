@@ -1,0 +1,294 @@
+TTN HELTEC V3 JOIN POSTMORTEM — 6 June 2026
+===========================================
+Written: ~14:25 UTC, 6 June 2026
+Device: heltec-v3-mapper (DevEUI 70B3D57ED0077DAF)
+Gateway: mowax-gateshead-01 (EUI 7243C4FFFEDF60B9)
+
+
+CURRENT STATE (confirmed from gateway logs, 14:23 UTC)
+======================================================
+Session 2 active. DevAddr 260B8DA2. FCnt 33 at 14:23 UTC. Uplinks every ~65s
+on EU868 channels (868.1, 867.5, 867.7, 867.1 MHz), SF10/BW125 (DR2).
+SNR: -1.5 to +2.0 dB. RSSI: -124 to -125 dBm.
+Gateway is responding (downlinks scheduled on RX1 at same channel/DR, seen
+at 14:13, 14:14, 14:15, 14:16 UTC).
+
+
+TIMELINE OF EVENTS
+==================
+
+--- JUNE 5 (previous evening) ---
+
+~17:28-18:03 UTC: Device sending rapid jreqs, DevNonces 23-41. All rejected
+  by TTN join server as dev_nonce_too_small. Floor was already above 41
+  from prior sessions.
+
+21:35:52 UTC: jreq DevNonce 42 received at gateway (SNR 1.2, RSSI -121 dBm).
+
+~21:46 UTC (estimated): Device joins with DevAddr 260B0639. NVS saves join
+  DevNonce (old firmware: saves on success only). Session starts.
+
+--- JUNE 5-6 OVERNIGHT ---
+
+Device running continuously. FCnt=132 at 00:00:32 UTC June 6 confirms join
+at approximately 21:35-21:46 UTC June 5 (132 uplinks × ~65s ≈ 2h25m before
+midnight). Uplinks flow uninterrupted through the night.
+
+Selected FCnt checkpoints (DevAddr 260B0639):
+  00:00 UTC → FCnt 132
+  01:13 UTC → FCnt 199
+  02:14 UTC → FCnt 254
+  04:13 UTC → FCnt 363
+  05:14 UTC → FCnt 418
+  06:14 UTC → FCnt 473  [FOpts=[65C0D6] — ADR request from network]
+  08:14 UTC → FCnt 583
+  09:14 UTC → FCnt 638
+  09:56 UTC → FCnt 676  ← LAST UPLINK FROM SESSION 1
+
+--- JUNE 6 MORNING (session 2 debugging begins) ---
+
+~09:56-10:00 UTC: USB connection for debugging/flashing causes ESP32 power
+  cycle. RTC RAM lost. Session 1 (260B0639) terminates. Device boots cold.
+
+  OLD FIRMWARE STATE AT THIS POINT:
+  - NVS DevNonce: saved value from June 5 join (~43-44)
+  - RTC RAM: cleared (power cycle)
+  - persist.loadSession() on cold boot reads from NVS only
+  - No valid full session in RTC → activateOTAA() attempts new RF join
+
+  CRITICAL BUG (pre-fix): persist.saveSession() only called on successful
+  join. Every failed attempt left NVS unchanged. The device would cycle
+  through the same low DevNonces repeatedly, always below TTN's floor.
+
+~10:00-10:47 UTC (~47 min gap in logs): Unknown number of jreq attempts.
+  Device sending DevNonces incrementing from NVS value. All rejected as
+  dev_nonce_too_small. No jreq/jacc entries visible in basicstation logs
+  for this window — container was likely restarted during debugging,
+  clearing prior log content.
+
+10:47:37-10:48:22 UTC: RAPID BURST — 7 consecutive jreqs accepted.
+
+  Event log (device live data, mowax-ttn-mapper):
+    10:47:37 → ns.up.join.process + js.join.accept + ns.down.join.schedule.fail
+    10:47:44 → ns.up.join.process + js.join.accept + ns.down.join.schedule.fail
+    10:47:51 → ns.up.join.process + js.join.accept + (no schedule.fail visible)
+    10:47:57 → ns.up.join.process + js.join.accept + ns.down.join.schedule.fail
+    10:48:05 → ns.up.join.process + js.join.accept + ns.down.join.schedule.fail
+    10:48:13 → ns.up.join.process + js.join.accept + ns.down.join.schedule.fail
+    10:48:20 → ns.up.join.process + js.join.accept + as.up.join.forward
+
+  WHAT HAPPENED: The jreqs in this burst were above TTN's join server floor.
+  TTN generated a JoinAccept for each one. But every JoinAccept was on
+  869.525 MHz / SF12 / BW125 — EU868 RX2 window, with 1% duty cycle
+  (≈36s airtime per hour). Rapid back-to-back jreqs exhausted the duty
+  cycle budget. The gateway scheduled each JoinAccept but the RF window
+  was unavailable due to the preceding transmissions. Device received none.
+
+  NET EFFECT ON FLOOR: TTN floor advanced by 7. For each js.join.accept,
+  TTN's join server incremented the accepted-DevNonce counter. The floor
+  is now 7 higher than where the burst started — but the device's NVS
+  did NOT advance (old firmware, no save-on-failure). The floor gap
+  just got worse.
+
+~10:48-11:00 UTC: Fix applied. Two firmware changes:
+  1. persist.saveSession(&node) now called after EVERY activateOTAA() call,
+     whether success or failure. NVS DevNonce advances on each attempt.
+  2. Exponential backoff added: 30s → 60s → 120s → 240s → 300s cap.
+     Rationale: 869.525 MHz at EU868 1% duty cycle allows ~1 JoinAccept
+     per ~250s. Rapid retries exhaust the budget; 300s intervals allow
+     it to recover.
+
+13:27:57-13:39:00 UTC: Series of dev_nonce_too_small failures (device live
+  data confirms 13 events in this window at ~12s intervals at start, then
+  ~300s apart).
+
+  These are NOW incrementing correctly (NVS fix in place). The device is
+  sending successively higher DevNonces, each one failing, each one saved
+  to NVS. It is working its way toward the floor.
+
+  Last confirmed dev_nonce_too_small: 13:39:00 UTC.
+
+~13:44 UTC (estimated): Device sends jreq with DevNonce above TTN floor.
+  js.join.accept issued. JoinAccept scheduled successfully (869.525 MHz
+  duty cycle has recovered — last RX2 attempt was the 10:47-10:48 burst
+  ~3 hours earlier, budget fully restored). Device receives JoinAccept.
+  New session opened with DevAddr 260B8DA2.
+
+  Join time estimated from FCnt backtrack: FCnt=33 at 14:23:31 UTC.
+  33 uplinks × ~65s/uplink = 2145s = 35.75 min before 14:23 = ~13:47 UTC.
+
+13:47-14:23 UTC (confirmed): Uplinks flowing continuously.
+  FCnt 24 at 14:13:38 UTC (SNR -1.5, RSSI -124)
+  FCnt 25 at 14:14:44 UTC (SNR +2.0, RSSI -124)
+  FCnt 26 at 14:15:50 UTC (SNR -1.8, RSSI -125)
+  FCnt 27 at 14:16:56 UTC (SNR +0.5, RSSI -125)
+  FCnt 33 at 14:23:31 UTC (SNR +1.5, RSSI -124)
+
+Total time from session break to join: ~09:56 to ~13:47 = 3h51m.
+
+
+ROOT CAUSE ANALYSIS
+===================
+
+There were three interlocking failure modes. Any one alone would have
+been survivable. Together they stretched a simple re-join into a 4-hour
+problem.
+
+1. NVS NOT PERSISTING DEVNONCE ON JOIN FAILURE (primary bug)
+-------------------------------------------------------------
+The old firmware called persist.saveSession() only on successful join.
+When the device power-cycled, NVS was at the DevNonce from the LAST
+SUCCESSFUL join (approximately 43, from the June 5 evening session).
+
+Every subsequent cold boot loaded this value and started trying from ~44.
+But TTN's floor was already above 44 (from accumulated prior sessions and
+then worsened by the burst at 10:47-10:48). The device would exhaust its
+backoff cycle, apparently "give up" (or get reset), and reload the same
+NVS value, starting the same cycle again.
+
+This is why the CLAUDE.md session notes described jreqs "wrapping" at
+DevNonces 43→61→43 — that wasn't a watchdog reset, it was NVS not
+advancing. Each boot restarted from the same floor.
+
+THE FIX: Call persist.saveSession(&node) after every activateOTAA() call,
+success or failure. NVS now advances on each attempt. Each cold boot
+starts above the previous cold boot's highest attempt.
+
+2. RAPID RETRIES EXHAUSTING 869.525 MHz DUTY CYCLE
+---------------------------------------------------
+Without exponential backoff, the device sent jreqs as fast as
+activateOTAA() returned — effectively back-to-back (7 in ~45 seconds
+at 10:47-10:48 UTC). The EU868 RX2 window is 869.525 MHz at 1% duty
+cycle. A JoinAccept on SF12/BW125 is ~2.5s of airtime. The budget is
+approximately 36s per hour.
+
+The burst used 7 × ~2.5s = 17.5s of airtime in under 1 minute. The
+gateway's duty cycle tracker saw all subsequent JoinAccept scheduling
+requests as over-budget and emitted ns.down.join.schedule.fail for every
+one. The join server accepted the jreq and generated a JoinAccept; the
+gateway just couldn't transmit it.
+
+This created the cruel situation visible in the TTN device live data:
+js.join.accept appearing, as.up.join.forward appearing, but the device
+sitting confused with no response.
+
+THE FIX: Exponential backoff: 30s → 60s → 120s → 240s → 300s cap.
+At 300s between attempts, one JoinAccept every 5 minutes — well within
+the EU868 1% duty cycle budget (~1 per 250s theoretical minimum).
+
+3. BURST AT 10:47-10:48 ADVANCED FLOOR WITHOUT DEVICE RECEIVING JOINSACCEPT
+-----------------------------------------------------------------------------
+This is the compounding effect. When a jreq succeeds (js.join.accept),
+TTN's join server increments its accepted-DevNonce counter for that
+DevEUI. This happens even if the device never receives the JoinAccept
+(ns.down.join.schedule.fail).
+
+The 7-jreq burst advanced TTN's floor by 7. But NVS stayed at the pre-
+burst value (old firmware, no save). So after the fix was applied, the
+device started incrementing from the pre-burst NVS value — which was now
+7 MORE steps below the new higher floor. The burst didn't help; it made
+things slightly worse by raising the target.
+
+After the fix, the device needed to increment DevNonce from its NVS value
+all the way up through the new elevated floor, one attempt per 300s.
+That accounts for the 2h46m from fix deployment (~11:00 UTC) to join
+(~13:47 UTC): approximately 33 attempts × 300s = ~165 minutes, which
+lands the device at the right DevNonce to cross TTN's floor.
+
+
+WHY TTN'S FLOOR WAS SO HIGH TO BEGIN WITH
+==========================================
+The TTN join server maintains a per-DevEUI DevNonce floor permanently —
+it survives device deletion, re-registration, and application changes.
+Prior debugging sessions on this device (before 6 June) had run the
+device through many jreq cycles. Each accepted join request advances the
+floor. Even rejected jreqs (dev_nonce_too_small) do NOT advance the floor.
+
+The June 5 evening join used DevNonce ~43, which was accepted. This set
+the floor to ~43. But 6-7 jreqs accepted in the 10:47-10:48 burst raised
+it by 7 again. Then subsequent accepted jreqs (if any from earlier June 6
+attempts that fell in the gap in available logs) may have raised it further.
+
+By the time the fix was working correctly (NVS incrementing, backoff
+spacing out attempts), the floor was high enough to require ~33 × 300s
+of attempts to cross. The device crossed it at ~13:47 UTC.
+
+
+WHAT FIXED IT (CONFIRMED)
+==========================
+Two changes to heltec-otaa/src/main.cpp:
+
+Change 1 — NVS save on failure:
+  Before:
+    if (state == RADIOLIB_LORAWAN_NEW_SESSION || ...)
+        persist.saveSession(&node);
+    // failure path: no save → NVS DevNonce unchanged
+
+  After:
+    if (join success) {
+        persist.saveSession(&node);
+    } else {
+        persist.saveSession(&node);  // NVS DevNonce advances even on fail
+        nextAttempt = millis() + backoff;
+    }
+
+Change 2 — Exponential backoff:
+  uint32_t shift = (attempt - 1) < 4 ? (attempt - 1) : 3;
+  uint32_t backoff = 30000UL * (1UL << shift);  // 30s, 60s, 120s, 240s
+  if (backoff > 300000UL) backoff = 300000UL;   // cap at 300s
+
+
+ANTENNA NOTE
+============
+All signal levels during the June 6 session were with the small whip
+antenna on the gateway. SNR -1.5 to +2.0 dB on uplinks is solid for
+indoor testing at close range. This is markedly better than the WiFi
+antenna era (SNR -7 to -11.75 dB documented in earlier sessions) and
+better than the gain antenna + near-field null config (-11 to -14 dB
+SNR on JoinAccepts from gain antenna null directly above the Heltec).
+
+Gateway is responding to uplinks with ADR downlinks on RX1 (same
+channel, same DR as uplink). This confirms the full uplink+downlink path
+is healthy. No duty cycle pressure from uplinks (uplinks are on EU868
+main channels, not 869.525 MHz).
+
+
+CURRENT DEVICE STATE
+====================
+DevEUI:    70B3D57ED0077DAF
+DevAddr:   260B8DA2
+Session:   New (OTAA Session 2, June 6 2026)
+FCnt:      33+ as of 14:23 UTC, incrementing
+Payload:   0x01 (dummy — restore GPS/mapper payload once session stable)
+Uplink interval: 60s
+Backoff:   Not in play (device is joined, uplink path active)
+OLED:      "JOINED / Uplinks: N"
+
+
+LESSONS
+=======
+1. Always call persist.saveSession() after EVERY activateOTAA() call.
+   The return code doesn't matter; the DevNonce must advance.
+
+2. EU868 Join requires exponential backoff, minimum 300s at cap.
+   1% duty cycle on 869.525 MHz is unforgiving. A 45-second burst of
+   jreqs wastes 4 hours of join attempts.
+
+3. TTN's DevNonce floor is permanent and accumulates across all sessions.
+   Every accepted jreq raises it. Every rejected jreq (dev_nonce_too_small)
+   does NOT raise it. This asymmetry is crucial: sending jreqs that get
+   accepted-but-device-misses is worse than sending none at all.
+
+4. ns.down.join.schedule.fail is not a join failure at the join server.
+   js.join.accept + ns.down.join.schedule.fail = floor advanced, device
+   gets nothing. This is the worst possible outcome per join attempt.
+
+5. RTC RAM vs NVS: RST button preserves RTC RAM (session restored instantly,
+   no RF, no new jreq). Power cycle clears RTC RAM (cold boot, NVS only,
+   full RF join required). Never confuse the two — they have completely
+   different DevNonce behaviour.
+
+6. DevNonce floor cannot be reset by deleting/re-registering the device.
+   The only reset is TTN support intervention or waiting for the counter
+   to wrap (65535 → 0 is a 16-bit counter; wrapping would require tens
+   of thousands of jreqs — not realistic).
