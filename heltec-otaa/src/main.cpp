@@ -2,6 +2,7 @@
 #include <RadioLib.h>
 #include <LoRaWAN_ESP32.h>
 #include <SSD1306Wire.h>
+#include "secrets.h"
 
 #define VEXT_PIN    36
 #define NSS_PIN      8
@@ -17,12 +18,10 @@ SSD1306Wire display(OLED_ADDR, OLED_SDA, OLED_SCL);
 SX1262 radio = new Module(NSS_PIN, DIO1_PIN, RST_PIN, BUSY_PIN);
 LoRaWANNode node(&radio, &EU868);
 
-uint64_t joinEUI = 0x0000000000000000;
-uint64_t devEUI  = 0x0000000000000000;  // replace with your DevEUI from TTN console
-uint8_t  appKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // replace with your AppKey
-uint8_t  nwkKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // same as AppKey for OTAA on TTN
+uint64_t joinEUI = JOINEUI;
+uint64_t devEUI  = DEVEUI;
+uint8_t  appKey[] = APPKEY;
+uint8_t  nwkKey[] = NWKKEY;
 
 uint32_t uplinkCount = 0;
 
@@ -79,14 +78,20 @@ void setup() {
 void loop() {
     if (!node.isActivated()) {
         static uint16_t attempt = 0;
+        static uint32_t nextAttempt = 0;
+
+        if (millis() < nextAttempt) return;
+
         attempt++;
-        char buf[20];
-        snprintf(buf, sizeof(buf), "Try #%u", attempt);
-        Serial.printf("Join attempt #%u\n", attempt);
+        uint32_t shift = (attempt - 1) < 4 ? (attempt - 1) : 3;
+        uint32_t backoff = 30000UL * (1UL << shift);
+        if (backoff > 300000UL) backoff = 300000UL;
+
+        char buf[20]; snprintf(buf, sizeof(buf), "Try #%u", attempt);
+        Serial.printf("Join attempt #%u (backoff %lus)\n", attempt, backoff/1000);
         oledShow("Joining...", buf);
 
         int state = node.activateOTAA();
-
         if (state == RADIOLIB_LORAWAN_NEW_SESSION ||
             state == RADIOLIB_LORAWAN_SESSION_RESTORED ||
             state == RADIOLIB_ERR_NONE) {
@@ -94,13 +99,12 @@ void loop() {
             const char* msg = (state == RADIOLIB_LORAWAN_SESSION_RESTORED) ? "Restored" : "New join";
             Serial.printf("*** JOINED (%s) ***\n", msg);
             oledShow("JOINED", msg);
+            attempt = 0;
         } else {
-            Serial.printf("Join failed (%d), retrying\n", state);
+            Serial.printf("Join failed (%d), next in %lus\n", state, backoff/1000);
             oledShow("Join FAIL", buf);
-            // No long delay — burn through DevNonces at ~1 per 6s (RX window timeout)
-            // until TTN's join server floor is passed. saveSession() after first success
-            // captures the accepted nonce so future power cycles work.
-            delay(100);
+            persist.saveSession(&node);
+            nextAttempt = millis() + backoff;
         }
         return;
     }
