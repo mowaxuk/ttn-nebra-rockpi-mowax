@@ -455,6 +455,16 @@ The current firmware sends a 1-byte dummy payload (`0x01`) on port 1 every 60 se
 ```
 .
 ├── README.md
+├── LICENSE
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md
+├── basicstation-reset.sh.gpiod       # No-op reset script — mount into container
+├── ttn-join-postmortem-2026-06-06.txt # Full timeline of the 3h51m DevNonce floor incident
+├── docs/
+│   ├── gl5712-nreset-inverter.md     # The inverted NRESET line — most critical hardware note
+│   ├── hardware-notes.md             # Pin mapping, module identification, SPI NOR flash recall
+│   └── spi-debugging.md             # SPI device tree investigation and custom overlay fix
 └── heltec-otaa/
     ├── platformio.ini
     └── src/
@@ -470,3 +480,4 @@ The current firmware sends a 1-byte dummy payload (`0x01`) on port 1 every 60 se
 - [ropg/LoRaWAN_ESP32](https://github.com/ropg/LoRaWAN_ESP32) — NVS session persistence helper
 - [TTN Mapper](https://ttnmapper.org) — coverage mapping platform
 - [The Things Network Sandbox](https://www.thethingsnetwork.org) — free community LoRaWAN network
+- [chirpstack-nebra-rockpi-Mowax](https://github.com/mowaxuk/chirpstack-nebra-rockpi-Mowax) — sister repo: same hardware with ChirpStack v4
